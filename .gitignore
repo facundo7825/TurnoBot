@@ -1,0 +1,17 @@
+# Dependencias y artefactos (se generan en el build de Railway)
+node_modules/
+web/dist/
+
+# Datos locales de SQLite (en producción se usa Postgres)
+server/data/
+
+# Secretos y logs
+.env
+server/.env
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# NOTA: los package-lock.json SÍ se versionan (builds reproducibles en Railway).
