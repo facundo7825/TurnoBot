@@ -14,4 +14,7 @@ server/.env
 .DS_Store
 Thumbs.db
 
+# Capturas de pantalla locales (pueden tener datos personales)
+img/
+
 # NOTA: los package-lock.json SÍ se versionan (builds reproducibles en Railway).

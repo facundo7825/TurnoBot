@@ -1,5 +1,22 @@
 const GRAPH_BASE = 'https://graph.facebook.com/v21.0';
 
+/**
+ * Normaliza el número destinatario para el envío por Cloud API.
+ *
+ * WhatsApp entrega los webhooks de números móviles argentinos CON el "9"
+ * (54 9 AA…), pero para ENVIARLES un mensaje espera el número SIN el "9"
+ * (54 AA…). Si no se quita, Meta rechaza con error 131030. Esta función
+ * solo afecta a Argentina; el resto de los países queda igual.
+ */
+export function normalizeRecipient(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  // Argentina móvil: 549 + 10 dígitos (13 en total) -> quitar el 9
+  if (digits.startsWith('549') && digits.length === 13) {
+    return '54' + digits.slice(3);
+  }
+  return digits;
+}
+
 /** Envía un mensaje de texto por WhatsApp Cloud API con las credenciales del tenant. */
 export async function sendWhatsAppText(tenant, toPhone, body) {
   if (!tenant.wa_phone_number_id || !tenant.wa_access_token) {
@@ -16,7 +33,7 @@ export async function sendWhatsAppText(tenant, toPhone, body) {
       body: JSON.stringify({
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: toPhone,
+        to: normalizeRecipient(toPhone),
         type: 'text',
         text: { preview_url: false, body },
       }),
@@ -82,7 +99,7 @@ export async function sendWhatsAppInteractive(tenant, toPhone, body, options) {
       body: JSON.stringify({
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: toPhone,
+        to: normalizeRecipient(toPhone),
         type: 'interactive',
         interactive,
       }),
