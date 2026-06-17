@@ -1,131 +1,154 @@
 # 🤖 TurnoBot
 
-Plataforma SaaS para que cualquier negocio (peluquería, consultorio, estética, hotel…) cree su **bot de WhatsApp** que responde solo y gestiona la **agenda de turnos** automáticamente.
+> Plataforma SaaS para que cualquier negocio cree su **bot de WhatsApp** que atiende solo y gestiona la **agenda de turnos** automáticamente.
 
-Cada usuario se registra, configura su negocio (servicios, horarios, mensajes, FAQs), conecta su número con la **API oficial de WhatsApp Cloud (Meta)** y el bot se encarga del resto: responde clientes 24/7, ofrece turnos disponibles, reserva, consulta y cancela — todo queda registrado en la agenda del panel.
+Pensada para peluquerías, barberías, estética, consultorios, gimnasios, hoteles, gastronomía y cualquier negocio que trabaje con turnos. Cada negocio se registra, configura su bot en minutos, conecta su WhatsApp **escaneando un QR** (como WhatsApp Web) y listo: el bot responde a sus clientes 24/7, ofrece los horarios disponibles, reserva, recuerda y cancela turnos — todo queda registrado en el panel.
 
-## Stack
+**Estado:** en producción (Railway + PostgreSQL + Evolution API).
+
+---
+
+## ✨ Características
+
+**Para el dueño del negocio (panel web):**
+- 📊 **Dashboard** con métricas (turnos del día/semana, clientes, reservas del bot) y un checklist de puesta en marcha.
+- 🗓️ **Agenda semanal** para ver, crear, cancelar y completar turnos. Los del bot aparecen marcados con 🤖 y muestran si el cliente confirmó asistencia.
+- ⌬ **Configuración del bot** sin código: mensajes, servicios (duración y precio), horarios por día, preguntas frecuentes por palabras clave.
+- ✦ **IA opcional** (Claude): si el dueño carga su API key, el bot responde preguntas libres con el contexto del negocio.
+- ◳ **Conversaciones**: historial completo de cada cliente, con opción de **pausar el bot** y atender a mano.
+- ▷ **Simulador**: prueba el bot exactamente como lo vería un cliente, sin conectar nada.
+- 🧩 **Plantillas por rubro**: al registrarse, el negocio arranca con servicios y FAQs típicos de su rubro (editables).
+
+**Lo que hace el bot solo con los clientes:**
+- 💬 Atiende por **menú** (reservar, ver turnos, cancelar, horarios/ubicación, consulta libre).
+- 📅 **Reserva turnos** ofreciendo solo días y horarios con disponibilidad real (verifica superposiciones y horarios de atención).
+- ⏰ **Recordatorio automático** el día anterior, con opción de **confirmar o cancelar** (si cancela, el horario se libera solo).
+- ☀️ **Resumen diario** al dueño cada mañana con la agenda del día.
+- 🙋 **Derivación a humano**: si el cliente pide hablar con una persona, el bot se pausa en esa conversación y le avisa al dueño.
+- 🔔 **Aviso al dueño** cada vez que el bot reserva un turno.
+
+---
+
+## 🧱 Stack
 
 | Capa | Tecnología |
 |---|---|
-| Backend | Node.js 20 + Express. **PostgreSQL** en producción, **SQLite** en desarrollo (mismo código, se elige por `DATABASE_URL`) |
+| Backend | Node.js 20 + Express |
+| Base de datos | **PostgreSQL** en producción · **SQLite** en desarrollo (mismo código, se elige por `DATABASE_URL`) |
 | Auth | JWT + bcrypt |
-| WhatsApp | Evolution API (no oficial, vía QR/Baileys) — webhook multi-tenant, ruteo por instancia |
-| IA opcional | Claude (`@anthropic-ai/sdk`) con API key por negocio |
-| Frontend | React 18 + Vite, diseño dark "consola nocturna" |
+| WhatsApp | **Evolution API** (vía QR/Baileys) — webhook multi-tenant, ruteo por instancia |
+| IA opcional | Claude (`@anthropic-ai/sdk`), API key por negocio |
+| Frontend | React 18 + Vite — diseño dark "consola nocturna" |
+| Deploy | Railway (un solo proceso sirve API + frontend) |
 
-## Cómo correrlo
+---
+
+## 🚀 Cómo se usa (dueño del negocio)
+
+1. **Se registra** → se crea su negocio con horarios y plantilla de su rubro por defecto.
+2. En **Mi bot** ajusta mensajes, servicios, horarios, FAQs y (opcional) la IA.
+3. En **Simulador** prueba el bot como si fuera un cliente.
+4. En **Conexión WhatsApp** vincula su número escaneando un **QR** (WhatsApp → Dispositivos vinculados → Vincular un dispositivo). En segundos el bot empieza a responder.
+5. Gestiona todo desde la **Agenda** y **Conversaciones**.
+
+---
+
+## 🏗️ Arquitectura multi-tenant
+
+- Cada negocio tiene su propia **instancia** en Evolution API, conectada por QR.
+- Un único webhook `/api/webhook` recibe el evento `messages.upsert` de Evolution con el nombre de instancia, y el server enruta el mensaje al negocio correcto.
+- Cada negocio solo accede a sus propios datos (todas las consultas filtran por `tenant_id`).
+- El **motor conversacional** (`server/src/engine.js`) es el mismo para el WhatsApp real y para el simulador: lo que ves en el simulador es exactamente lo que recibe el cliente.
+
+---
+
+## 💻 Correr en local (desarrollo)
 
 ```bash
-# 1. Instalar dependencias (raíz, server y web)
+# Instalar dependencias
 npm install
-npm install --prefix server
-npm install --prefix web
+cd server && npm install && cd ..
+cd web && npm install && cd ..
 
-# 2. Levantar todo en modo desarrollo
+# Levantar todo en modo desarrollo
 npm run dev
 ```
 
 - Frontend: http://localhost:5173
 - API: http://localhost:4000
 
-La base de datos se crea sola: en desarrollo es SQLite en `server/data/turnobot.db` (no necesitás
-instalar nada). En producción usás PostgreSQL seteando `DATABASE_URL` — ver `DEPLOY.md`.
+En desarrollo usa **SQLite** automáticamente (`server/data/turnobot.db`) — no necesitás instalar ninguna base. El simulador funciona sin conectar WhatsApp.
 
-> ⚠️ Si `npm install` falla con `UNABLE_TO_VERIFY_LEAF_SIGNATURE` (típico cuando un antivirus
-> intercepta TLS), instalá así: entrá a la carpeta (`cd server` / `cd web`) y corré
-> `NODE_TLS_REJECT_UNAUTHORIZED=0 npm install --strict-ssl=false`.
+> ⚠️ Si `npm install` falla con `UNABLE_TO_VERIFY_LEAF_SIGNATURE` (un antivirus/proxy interceptando TLS), instalá con: `NODE_TLS_REJECT_UNAUTHORIZED=0 npm install --strict-ssl=false`.
 
 ### Tests
 
 ```bash
 node server/test/smoke.js   # simula una conversación completa de reserva (SQLite)
 
-# El mismo test contra Postgres (valida el dialecto):
+# El mismo test contra Postgres (valida el dialecto SQL):
 DATABASE_URL=postgres://usuario:pass@host:5432/db node server/test/smoke.js
 ```
 
-### Base de datos: SQLite (dev) ↔ Postgres (prod)
+---
 
-La capa `server/src/database.js` expone una API async única (`q.one/all/run/exec`) y elige el motor
-según `DATABASE_URL`: si está vacío usa SQLite (archivo local); si tiene una URL `postgres://` usa
-PostgreSQL. La aplicación escribe SQL portable (placeholders `?`, traducidos a `$n` en Postgres) y las
-fechas se calculan en JS, así el mismo código corre idéntico en ambos motores. Para pasar a producción
-solo seteás `DATABASE_URL` — no hay que cambiar código. Ver **`DEPLOY.md`**.
+## 📦 Despliegue
 
-### Producción (un solo proceso)
+El proyecto está listo para Railway (incluye `railway.json` y el script `deploy:build`). El paso a paso completo está en **[`DEPLOY.md`](DEPLOY.md)**.
 
-```bash
-npm run build          # compila el frontend a web/dist
-npm start              # el server sirve la API y el frontend en :4000
-```
+En resumen: se crea una base PostgreSQL, se setea `DATABASE_URL` + `JWT_SECRET` (+ las de Evolution), y Railway buildea y arranca solo. Para habilitar la conexión de WhatsApp por QR hay que hospedar Evolution API — guía en **[`PLATFORM-SETUP.md`](PLATFORM-SETUP.md)**.
 
-Variables de entorno opcionales del server:
+### Variables de entorno
 
 | Variable | Uso |
 |---|---|
-| `PORT` | Puerto del server (default 4000) |
-| `JWT_SECRET` | Secreto para firmar tokens (¡cambiar en producción!) |
 | `DATABASE_URL` | Postgres en producción (vacío = SQLite local) |
-| `EVOLUTION_API_URL` / `EVOLUTION_API_KEY` | Servidor de Evolution API para WhatsApp (ver `PLATFORM-SETUP.md`) |
-| `APP_URL` | URL pública de la app, para el webhook de Evolution |
+| `JWT_SECRET` | Secreto para firmar sesiones (**obligatorio en producción**) |
+| `EVOLUTION_API_URL` / `EVOLUTION_API_KEY` | Servidor de Evolution API para WhatsApp |
+| `APP_URL` | URL pública de la app (para el webhook de Evolution) |
+| `TZ` | Zona horaria (ej: `America/Argentina/Buenos_Aires`) |
+| `PORT` | Puerto del server (default 4000) |
 
-## Flujo del usuario (dueño del negocio)
+---
 
-1. **Se registra** en la web → se crea su negocio (tenant) con horarios por defecto.
-2. En **Mi bot** configura: mensajes, servicios (nombre/duración/precio), horarios por día, FAQs por palabras clave y, si quiere, la IA con su API key de Anthropic.
-3. En **Simulador** prueba el bot exactamente como lo vería un cliente (sin necesidad de conectar nada).
-4. En **Conexión WhatsApp** conecta su WhatsApp **escaneando un QR** (como WhatsApp Web):
-   - Toca **Generar código QR**.
-   - En su celular: WhatsApp → Dispositivos vinculados → Vincular un dispositivo → escanea.
-   - En segundos queda conectado y el bot empieza a responder. Sin trámites de Meta.
-   - Requiere que la plataforma tenga Evolution API configurada (ver `PLATFORM-SETUP.md`).
-5. **Agenda**: ve la semana completa, crea turnos manuales, cancela o completa turnos. Los turnos del bot aparecen marcados con 🤖.
-6. **Conversaciones**: historial completo de cada cliente con el bot.
+## 📚 Documentación
 
-> 💡 La conexión por QR requiere un servidor de Evolution API hospedado (ver `PLATFORM-SETUP.md`). Mientras tanto, el **Simulador** funciona sin conectar nada.
+| Documento | Contenido |
+|---|---|
+| [`DEPLOY.md`](DEPLOY.md) | Despliegue paso a paso en Railway (app + Postgres) |
+| [`PLATFORM-SETUP.md`](PLATFORM-SETUP.md) | Hospedar Evolution API para la conexión de WhatsApp por QR |
+| [`PRODUCCION.md`](PRODUCCION.md) | Plan de robustez para producción (uptime, backups, observabilidad, escala) |
+| [`SEGURIDAD.md`](SEGURIDAD.md) | Auditoría y plan de seguridad del SaaS |
 
-## Qué hace el bot con los clientes
+---
 
-- Saluda con mensaje de bienvenida configurable y muestra un menú numerado.
-- **1** Reservar turno → servicio → día con disponibilidad real → horario libre → nombre → confirmación. Verifica superposiciones y horarios de atención.
-- **2** Ver turnos próximos.
-- **3** Cancelar un turno.
-- **4** Horarios y ubicación del negocio.
-- **5** Consulta libre → responde por FAQs (palabras clave) o con IA (Claude) si está activada; si no, mensaje de fallback configurable.
-- `menu` en cualquier momento vuelve al inicio.
-- En WhatsApp usa un **menú de texto numerado**; el simulador del panel muestra las opciones como chips clickeables.
-- **Recordatorios automáticos**: el día anterior al turno le manda un WhatsApp al cliente (configurable en Mi bot → Avisos).
-- **Aviso al dueño**: cada vez que el bot reserva, le llega un WhatsApp al número del dueño (configurable en Mi bot → Avisos).
-
-Al registrarse, cada negocio arranca con **servicios y FAQs precargados según su rubro** (editables), y el Dashboard muestra un **checklist de puesta en marcha** (cargar servicios → probar el simulador → conectar WhatsApp).
-
-## Arquitectura multi-tenant
-
-- Cada negocio tiene una **instancia** en Evolution API, conectada por QR (como WhatsApp Web).
-- Un solo webhook `/api/webhook` para todos: Evolution manda el evento `messages.upsert` con el nombre de instancia, y el server enruta al tenant correcto.
-- Cada tenant guarda su propia API key de Anthropic (nunca se devuelve al frontend, solo un flag de "configurada").
-- El motor conversacional (`server/src/engine.js`) es compartido por el webhook real y el simulador del panel: lo que ves en el simulador es exactamente lo que recibe el cliente.
-
-## Estructura
+## 🗂️ Estructura
 
 ```
 server/
   src/
-    index.js      # Express, inicializa la base y sirve API + frontend compilado
+    index.js      # Express: inicializa la base, sirve API + frontend compilado
     database.js   # capa de datos async dual (Postgres/SQLite) + esquema y migraciones
     env.js        # carga server/.env
     auth.js       # JWT + bcrypt
-    routes.js     # API del panel (tenant, servicios, horarios, faqs, agenda, stats, simulador, WhatsApp)
+    routes.js     # API del panel (tenant, servicios, horarios, FAQs, agenda, stats, simulador, WhatsApp)
     webhook.js    # webhook de Evolution (messages.upsert → motor)
     engine.js     # motor conversacional (máquina de estados de reservas)
-    booking.js    # disponibilidad, slots libres y helpers de fecha
-    whatsapp.js   # Evolution API: instancias, QR, estado, envío de mensajes
+    booking.js    # disponibilidad, horarios libres y helpers de fecha
+    whatsapp.js   # Evolution API: instancias, QR, estado de conexión, envío
     reminders.js  # recordatorios + resumen diario (loops en segundo plano)
-    ai.js         # respuestas libres con Claude (opcional, por tenant)
+    ai.js         # respuestas libres con Claude (opcional, por negocio)
+  test/
+    smoke.js      # test del motor del bot (reserva, confirmación, cancelación, handoff)
 web/
   src/
     pages/        # Landing, Login, Registro, Dashboard, Agenda, Mi bot, Conversaciones, WhatsApp, Simulador
-    components/   # Shell (sidebar)
+    components/   # Shell (sidebar de navegación)
     styles.css    # sistema de diseño dark
 ```
+
+---
+
+## ⚠️ Nota sobre Evolution API
+
+Evolution API es una integración **no oficial** de WhatsApp (vía Baileys). Es gratuita y no requiere trámites de verificación, ideal para arrancar y validar. A tener en cuenta: WhatsApp puede restringir un número que use APIs no oficiales (riesgo bajo para un bot que solo responde, pero no nulo) y, al depender de WhatsApp Web, conviene mantener Evolution en una versión reciente. Para un servicio a gran escala o de misión crítica puede evaluarse la API oficial de Meta (el proyecto pasó por ambas integraciones).
