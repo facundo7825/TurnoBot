@@ -1,189 +1,151 @@
-const GRAPH_BASE = 'https://graph.facebook.com/v21.0';
-
 /**
- * Normaliza el número destinatario para el envío por Cloud API.
+ * Capa de WhatsApp sobre Evolution API (no oficial, vía Baileys).
  *
- * WhatsApp entrega los webhooks de números móviles argentinos CON el "9"
- * (54 9 AA…), pero para ENVIARLES un mensaje espera el número SIN el "9"
- * (54 AA…). Si no se quita, Meta rechaza con error 131030. Esta función
- * solo afecta a Argentina; el resto de los países queda igual.
+ * Cada negocio (tenant) tiene una "instancia" en Evolution que se conecta
+ * escaneando un QR con el WhatsApp del dueño. Todas las operaciones usan el
+ * API key GLOBAL de Evolution (admin), así no hay que gestionar el token de
+ * cada instancia por separado.
+ *
+ * Config (env): EVOLUTION_API_URL, EVOLUTION_API_KEY
  */
-export function normalizeRecipient(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  // Argentina móvil: 549 + 10 dígitos (13 en total) -> quitar el 9
-  if (digits.startsWith('549') && digits.length === 13) {
-    return '54' + digits.slice(3);
-  }
-  return digits;
+
+const BASE = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
+const KEY = process.env.EVOLUTION_API_KEY || '';
+
+export function evolutionConfigured() {
+  return !!(BASE && KEY);
 }
 
-/** Envía un mensaje de texto por WhatsApp Cloud API con las credenciales del tenant. */
-export async function sendWhatsAppText(tenant, toPhone, body) {
-  if (!tenant.wa_phone_number_id || !tenant.wa_access_token) {
-    console.warn(`[whatsapp] tenant ${tenant.id} sin credenciales, mensaje no enviado`);
-    return { ok: false, error: 'missing_credentials' };
-  }
+/** Nombre de instancia estable y único por tenant. */
+export function instanceNameFor(tenant) {
+  return tenant.evolution_instance || `turnobot_${tenant.id}`;
+}
+
+async function evo(path, { method = 'GET', body } = {}) {
+  if (!evolutionConfigured()) return { ok: false, status: 0, data: { error: 'evolution_not_configured' } };
   try {
-    const res = await fetch(`${GRAPH_BASE}/${tenant.wa_phone_number_id}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${tenant.wa_access_token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: normalizeRecipient(toPhone),
-        type: 'text',
-        text: { preview_url: false, body },
-      }),
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { apikey: KEY, 'Content-Type': 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    const data = await res.json();
-    if (!res.ok) {
-      console.error(`[whatsapp] error enviando (tenant ${tenant.id}):`, JSON.stringify(data));
-      return { ok: false, error: data.error?.message || 'send_failed' };
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* sin cuerpo */
     }
-    return { ok: true, id: data.messages?.[0]?.id };
+    return { ok: res.ok, status: res.status, data };
   } catch (err) {
-    console.error(`[whatsapp] fetch error (tenant ${tenant.id}):`, err.message);
-    return { ok: false, error: err.message };
+    return { ok: false, status: 0, data: { error: err.message } };
   }
+}
+
+/** Extrae el número (solo dígitos) de un JID de WhatsApp: "549...@s.whatsapp.net" -> "549...". */
+export function phoneFromJid(jid) {
+  return String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+// ---------- Gestión de instancias (conexión por QR) ----------
+
+/**
+ * Crea la instancia del tenant (si no existe) y le configura el webhook
+ * apuntando a nuestra URL. Idempotente: si ya existe, no falla.
+ */
+export async function createInstance(instanceName, webhookUrl) {
+  const create = await evo('/instance/create', {
+    method: 'POST',
+    body: { instanceName, integration: 'WHATSAPP-BAILEYS', qrcode: true },
+  });
+  // 403/409 => ya existe; lo tratamos como ok para reusarla
+  const alreadyExists = !create.ok && /already in use|exists/i.test(JSON.stringify(create.data || {}));
+  if (!create.ok && !alreadyExists) {
+    return { ok: false, error: create.data?.response?.message || create.data?.error || 'create_failed' };
+  }
+  if (webhookUrl) await setWebhook(instanceName, webhookUrl);
+  return { ok: true, qr: create.data?.qrcode?.base64 || null };
+}
+
+/** Configura el webhook de la instancia (evento de mensajes entrantes). */
+export async function setWebhook(instanceName, webhookUrl) {
+  const r = await evo(`/webhook/set/${instanceName}`, {
+    method: 'POST',
+    body: {
+      webhook: {
+        enabled: true,
+        url: webhookUrl,
+        webhookByEvents: false,
+        base64: false,
+        events: ['MESSAGES_UPSERT'],
+      },
+    },
+  });
+  return { ok: r.ok };
+}
+
+/** Devuelve el QR (imagen base64) para escanear. Puede tardar unos segundos en estar listo. */
+export async function getQR(instanceName) {
+  const r = await evo(`/instance/connect/${instanceName}`);
+  if (!r.ok) return { ok: false, error: r.data?.error || 'connect_failed' };
+  let base64 = r.data?.base64 || r.data?.qrcode?.base64 || null;
+  if (base64 && !base64.startsWith('data:image')) base64 = `data:image/png;base64,${base64}`;
+  return { ok: true, qr: base64, pairingCode: r.data?.pairingCode || r.data?.code || null };
 }
 
 /**
- * Envía un mensaje interactivo nativo: hasta 3 opciones usa botones,
- * hasta 10 usa lista desplegable. Con más opciones (o si falla) el caller
- * debe caer al texto plano.
+ * Estado de conexión + datos del número conectado.
+ * state: 'open' (conectado) | 'connecting' | 'close'
  */
-export async function sendWhatsAppInteractive(tenant, toPhone, body, options) {
-  if (!tenant.wa_phone_number_id || !tenant.wa_access_token) {
-    return { ok: false, error: 'missing_credentials' };
-  }
-  if (!options?.length || options.length > 10) return { ok: false, error: 'unsupported_option_count' };
-
-  let interactive;
-  if (options.length <= 3) {
-    interactive = {
-      type: 'button',
-      body: { text: body.slice(0, 1024) },
-      action: {
-        buttons: options.map((o) => ({ type: 'reply', reply: { id: o.id, title: o.title.slice(0, 20) } })),
-      },
-    };
-  } else {
-    interactive = {
-      type: 'list',
-      body: { text: body.slice(0, 1024) },
-      action: {
-        button: 'Ver opciones',
-        sections: [
-          {
-            rows: options.map((o) => ({
-              id: o.id,
-              title: o.title.slice(0, 24),
-              ...(o.description ? { description: o.description.slice(0, 72) } : {}),
-            })),
-          },
-        ],
-      },
-    };
-  }
-
-  try {
-    const res = await fetch(`${GRAPH_BASE}/${tenant.wa_phone_number_id}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${tenant.wa_access_token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: normalizeRecipient(toPhone),
-        type: 'interactive',
-        interactive,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      console.error(`[whatsapp] error interactivo (tenant ${tenant.id}):`, JSON.stringify(data));
-      return { ok: false, error: data.error?.message || 'send_failed' };
+export async function getConnectionState(instanceName) {
+  const r = await evo(`/instance/connectionState/${instanceName}`);
+  if (!r.ok) return { ok: false, state: 'close' };
+  const state = r.data?.instance?.state || 'close';
+  let phone = '';
+  let profileName = '';
+  if (state === 'open') {
+    const list = await evo(`/instance/fetchInstances?instanceName=${instanceName}`);
+    const info = Array.isArray(list.data) ? list.data[0] : null;
+    if (info) {
+      phone = phoneFromJid(info.ownerJid);
+      profileName = info.profileName || '';
     }
-    return { ok: true, id: data.messages?.[0]?.id };
-  } catch (err) {
-    return { ok: false, error: err.message };
   }
+  return { ok: true, state, phone, profileName };
 }
 
-// ---------- Embedded Signup (conexión automática) ----------
-
-/** Cambia el código del popup de Facebook por un token de larga duración. */
-export async function exchangeCodeForToken(code) {
-  const appId = process.env.META_APP_ID;
-  const appSecret = process.env.META_APP_SECRET;
-  if (!appId || !appSecret) return { ok: false, error: 'platform_not_configured' };
-  try {
-    const url = `${GRAPH_BASE}/oauth/access_token?client_id=${appId}&client_secret=${appSecret}&code=${encodeURIComponent(code)}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!res.ok || !data.access_token) {
-      return { ok: false, error: data.error?.message || 'token_exchange_failed' };
-    }
-    return { ok: true, accessToken: data.access_token };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+/** Desconecta y elimina la instancia. */
+export async function deleteInstance(instanceName) {
+  await evo(`/instance/logout/${instanceName}`, { method: 'DELETE' });
+  const r = await evo(`/instance/delete/${instanceName}`, { method: 'DELETE' });
+  return { ok: r.ok };
 }
 
-/** Suscribe la app de la plataforma al WABA del cliente (para recibir sus mensajes en nuestro webhook). */
-export async function subscribeAppToWaba(wabaId, accessToken) {
-  try {
-    const res = await fetch(`${GRAPH_BASE}/${wabaId}/subscribed_apps`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    const data = await res.json();
-    if (!res.ok) return { ok: false, error: data.error?.message || 'subscribe_failed' };
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
+// ---------- Envío de mensajes (firma compatible con el motor) ----------
+
+/** Envía un mensaje de texto. Mantiene la firma usada por engine.js/reminders.js. */
+export async function sendWhatsAppText(tenant, toPhone, body) {
+  const instance = instanceNameFor(tenant);
+  if (!evolutionConfigured()) {
+    console.warn(`[whatsapp] Evolution sin configurar, mensaje no enviado (tenant ${tenant.id})`);
+    return { ok: false, error: 'evolution_not_configured' };
   }
+  const number = String(toPhone).replace(/\D/g, '');
+  const r = await evo(`/message/sendText/${instance}`, {
+    method: 'POST',
+    body: { number, text: body },
+  });
+  if (!r.ok) {
+    console.error(`[whatsapp] error enviando (tenant ${tenant.id}):`, JSON.stringify(r.data));
+    return { ok: false, error: r.data?.response?.message || r.data?.error || 'send_failed' };
+  }
+  return { ok: true, id: r.data?.key?.id };
 }
 
-/** Registra el número para la Cloud API (necesario para poder enviar mensajes). */
-export async function registerPhoneNumber(phoneNumberId, accessToken, pin) {
-  try {
-    const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/register`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      const msg = data.error?.message || 'register_failed';
-      // Si ya estaba registrado, lo tratamos como éxito
-      if (/already/i.test(msg)) return { ok: true, alreadyRegistered: true };
-      return { ok: false, error: msg };
-    }
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-/** Verifica que el token de acceso y el phone_number_id sean válidos consultando Graph. */
-export async function verifyCredentials(phoneNumberId, accessToken) {
-  try {
-    const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}?fields=display_phone_number,verified_name`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    const data = await res.json();
-    if (!res.ok) return { ok: false, error: data.error?.message || 'invalid_credentials' };
-    return { ok: true, displayPhone: data.display_phone_number, verifiedName: data.verified_name };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+/**
+ * Los botones/listas nativos de Baileys son inestables y WhatsApp los
+ * restringe fuera de la API oficial. Devolvemos no-soportado para que el
+ * caller caiga al menú de texto numerado (que ya existe como fallback).
+ */
+export async function sendWhatsAppInteractive() {
+  return { ok: false, error: 'interactive_not_supported_on_evolution' };
 }

@@ -1,83 +1,64 @@
 import { Router } from 'express';
 import { q } from './database.js';
 import { handleIncoming } from './engine.js';
-import { sendWhatsAppText, sendWhatsAppInteractive } from './whatsapp.js';
+import { sendWhatsAppText, phoneFromJid } from './whatsapp.js';
 
 const router = Router();
 
 /**
- * Webhook de WhatsApp Cloud API (compartido por todos los tenants).
- * - GET: verificación de Meta (hub.challenge). Acepta el verify token de cualquier tenant.
- * - POST: mensajes entrantes; se enruta al tenant por metadata.phone_number_id.
+ * Webhook de Evolution API (compartido por todas las instancias/tenants).
+ * Evolution envía el evento `messages.upsert` con el nombre de la instancia,
+ * que usamos para encontrar el tenant correcto.
  */
-
-router.get('/webhook', async (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode !== 'subscribe' || !token) return res.sendStatus(403);
-
-  const tenant = await q.one('SELECT id FROM tenants WHERE wa_verify_token = ?', [token]);
-  const globalToken = process.env.WEBHOOK_VERIFY_TOKEN;
-  if (tenant || (globalToken && token === globalToken)) {
-    console.log('[webhook] verificación OK');
-    return res.status(200).send(challenge);
-  }
-  res.sendStatus(403);
-});
-
 router.post('/webhook', async (req, res) => {
-  // Responder rápido: Meta reintenta si no recibe 200 en pocos segundos
+  // Responder rápido; el procesamiento sigue después
   res.sendStatus(200);
 
   try {
-    const entries = req.body?.entry || [];
-    for (const entry of entries) {
-      for (const change of entry.changes || []) {
-        const value = change.value;
-        if (!value?.messages?.length) continue;
+    const payload = req.body || {};
+    const event = (payload.event || '').toLowerCase();
+    if (event !== 'messages.upsert') return;
 
-        const phoneNumberId = value.metadata?.phone_number_id;
-        if (!phoneNumberId) continue;
-        const tenant = await q.one('SELECT * FROM tenants WHERE wa_phone_number_id = ?', [phoneNumberId]);
-        if (!tenant) {
-          console.warn(`[webhook] mensaje para phone_number_id desconocido: ${phoneNumberId}`);
-          continue;
-        }
+    const instanceName = payload.instance;
+    if (!instanceName) return;
 
-        for (const message of value.messages) {
-          // Texto plano, o respuesta a un botón/lista interactiva (llega el id de la opción)
-          let body = null;
-          if (message.type === 'text') {
-            body = message.text.body;
-          } else if (message.type === 'interactive') {
-            body =
-              message.interactive?.button_reply?.id ||
-              message.interactive?.list_reply?.id ||
-              message.interactive?.button_reply?.title ||
-              message.interactive?.list_reply?.title ||
-              null;
-          }
-          if (body == null) {
-            await sendWhatsAppText(
-              tenant,
-              message.from,
-              'Por ahora solo puedo leer mensajes de texto. 🙏 Escribí *menu* para ver las opciones.'
-            );
-            continue;
-          }
-          const profileName = value.contacts?.[0]?.profile?.name || '';
-          const { replies } = await handleIncoming(tenant, message.from, body, 'whatsapp', profileName);
-          for (const reply of replies) {
-            let sent = { ok: false };
-            if (reply.options?.length && reply.options.length <= 10) {
-              sent = await sendWhatsAppInteractive(tenant, message.from, reply.text, reply.options);
-            }
-            if (!sent.ok) {
-              await sendWhatsAppText(tenant, message.from, reply.text);
-            }
-          }
-        }
+    const tenant = await q.one('SELECT * FROM tenants WHERE evolution_instance = ?', [instanceName]);
+    if (!tenant) {
+      console.warn(`[webhook] mensaje para instancia desconocida: ${instanceName}`);
+      return;
+    }
+
+    // Evolution puede mandar uno o varios mensajes en data
+    const items = Array.isArray(payload.data) ? payload.data : [payload.data];
+    for (const msg of items) {
+      if (!msg?.key) continue;
+      if (msg.key.fromMe) continue; // eco de lo que enviamos nosotros
+      const jid = msg.key.remoteJid || '';
+      if (!jid.endsWith('@s.whatsapp.net')) continue; // ignorar grupos/estados
+
+      const text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        msg.message?.buttonsResponseMessage?.selectedDisplayText ||
+        msg.message?.listResponseMessage?.title ||
+        null;
+
+      const from = phoneFromJid(jid);
+      const profileName = msg.pushName || '';
+
+      if (!text) {
+        await sendWhatsAppText(
+          tenant,
+          from,
+          'Por ahora solo puedo leer mensajes de texto. 🙏 Escribí *menu* para ver las opciones.'
+        );
+        continue;
+      }
+
+      const { replies } = await handleIncoming(tenant, from, text, 'whatsapp', profileName);
+      for (const reply of replies) {
+        await sendWhatsAppText(tenant, from, reply.text);
       }
     }
   } catch (err) {

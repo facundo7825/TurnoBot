@@ -3,12 +3,21 @@ import { q } from './database.js';
 import { hashPassword, verifyPassword, signToken, requireAuth } from './auth.js';
 import { handleIncoming } from './engine.js';
 import {
-  verifyCredentials,
-  exchangeCodeForToken,
-  subscribeAppToWaba,
-  registerPhoneNumber,
+  evolutionConfigured,
+  instanceNameFor,
+  createInstance,
+  getQR,
+  getConnectionState,
+  deleteInstance,
 } from './whatsapp.js';
 import { freeSlots, todayYMD, ymdOffset, nowHHMM } from './booking.js';
+
+/** URL pública de la app, para que Evolution mande el webhook acá. */
+function appUrl(req) {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  return `${proto}://${req.headers.host}`;
+}
 
 const router = Router();
 
@@ -197,64 +206,69 @@ router.put('/tenant', requireAuth, async (req, res) => {
   res.json({ tenant: publicTenant(tenant) });
 });
 
-// Config pública de la plataforma para el Embedded Signup (sin secretos)
-router.get('/meta-config', requireAuth, (req, res) => {
-  const appId = process.env.META_APP_ID || '';
-  const configId = process.env.META_CONFIG_ID || '';
-  res.json({ enabled: !!(appId && configId && process.env.META_APP_SECRET), appId, configId });
+// ¿Está configurada la conexión con Evolution API a nivel plataforma?
+router.get('/whatsapp/config', requireAuth, (req, res) => {
+  res.json({ enabled: evolutionConfigured() });
 });
 
 /**
- * Cierre del Embedded Signup: el popup de Facebook devuelve un code +
- * phone_number_id + waba_id. Acá hacemos todo lo demás solos:
- * token, suscripción del WABA a nuestra app y registro del número.
+ * Inicia la conexión: crea (o reusa) la instancia del tenant en Evolution,
+ * le configura el webhook hacia esta app y devuelve el QR para escanear.
  */
-router.post('/whatsapp/embedded-signup', requireAuth, async (req, res) => {
-  const { code, phone_number_id, waba_id } = req.body || {};
-  if (!code || !phone_number_id || !waba_id) {
-    return res.status(400).json({ error: 'Faltan datos de la conexión con Facebook. Probá de nuevo.' });
+router.post('/whatsapp/connect', requireAuth, async (req, res) => {
+  if (!evolutionConfigured()) {
+    return res.status(503).json({ error: 'La conexión de WhatsApp no está habilitada en el servidor.' });
+  }
+  // Nombre de instancia estable; se genera una vez y se guarda
+  let instance = req.tenant.evolution_instance;
+  if (!instance) {
+    instance = `turnobot_${req.tenant.id}_${Math.random().toString(36).slice(2, 8)}`;
+    await q.run('UPDATE tenants SET evolution_instance = ? WHERE id = ?', [instance, req.tenant.id]);
   }
 
-  const exchange = await exchangeCodeForToken(code);
-  if (!exchange.ok) {
-    return res.status(400).json({ error: `No pudimos obtener el acceso de Meta: ${exchange.error}` });
+  const webhookUrl = `${appUrl(req)}/api/webhook`;
+  const result = await createInstance(instance, webhookUrl);
+  if (!result.ok) {
+    return res.status(400).json({ error: `No se pudo iniciar la conexión: ${result.error}` });
   }
-  const token = exchange.accessToken;
-
-  const sub = await subscribeAppToWaba(waba_id, token);
-  if (!sub.ok) {
-    return res.status(400).json({ error: `No pudimos suscribir tu cuenta de WhatsApp: ${sub.error}` });
-  }
-
-  const pin = String(Math.floor(100000 + Math.random() * 900000));
-  const reg = await registerPhoneNumber(phone_number_id, token, pin);
-  if (!reg.ok) {
-    return res.status(400).json({ error: `No pudimos registrar tu número: ${reg.error}` });
-  }
-
-  const check = await verifyCredentials(phone_number_id, token);
-  await q.run(
-    `UPDATE tenants SET wa_phone_number_id = ?, wa_access_token = ?, wa_waba_id = ?,
-       wa_connected = 1, wa_display_phone = ? WHERE id = ?`,
-    [phone_number_id, token, waba_id, check.ok ? check.displayPhone || '' : '', req.tenant.id]
-  );
-
-  const tenant = await q.one('SELECT * FROM tenants WHERE id = ?', [req.tenant.id]);
-  res.json({ ok: true, displayPhone: tenant.wa_display_phone, tenant: publicTenant(tenant) });
+  // El QR puede no venir al instante; el front lo pide con /whatsapp/qr
+  res.json({ ok: true, qr: result.qr || null });
 });
 
-router.post('/tenant/verify-whatsapp', requireAuth, async (req, res) => {
-  const tenant = await q.one('SELECT * FROM tenants WHERE id = ?', [req.tenant.id]);
-  if (!tenant.wa_phone_number_id || !tenant.wa_access_token) {
-    return res.status(400).json({ error: 'Primero guardá el Phone Number ID y el Access Token' });
+/** Devuelve el QR actual de la instancia del tenant (para mostrar/refrescar). */
+router.get('/whatsapp/qr', requireAuth, async (req, res) => {
+  const instance = instanceNameFor(req.tenant);
+  if (!req.tenant.evolution_instance) return res.json({ qr: null });
+  const r = await getQR(instance);
+  res.json({ qr: r.qr || null, pairingCode: r.pairingCode || null });
+});
+
+/** Estado de conexión; si quedó conectado, lo persiste con el número. */
+router.get('/whatsapp/state', requireAuth, async (req, res) => {
+  if (!req.tenant.evolution_instance) return res.json({ state: 'close', connected: false });
+  const instance = instanceNameFor(req.tenant);
+  const r = await getConnectionState(instance);
+  const connected = r.state === 'open';
+
+  // Persistir cambios de estado
+  if (connected && (!req.tenant.wa_connected || (r.phone && r.phone !== req.tenant.wa_display_phone))) {
+    await q.run('UPDATE tenants SET wa_connected = 1, wa_display_phone = ? WHERE id = ?', [r.phone || '', req.tenant.id]);
+  } else if (!connected && req.tenant.wa_connected) {
+    await q.run('UPDATE tenants SET wa_connected = 0 WHERE id = ?', [req.tenant.id]);
   }
-  const result = await verifyCredentials(tenant.wa_phone_number_id, tenant.wa_access_token);
-  if (!result.ok) {
-    await q.run('UPDATE tenants SET wa_connected = 0 WHERE id = ?', [tenant.id]);
-    return res.status(400).json({ error: `Meta rechazó las credenciales: ${result.error}` });
+
+  res.json({ state: r.state, connected, phone: r.phone || '', profileName: r.profileName || '' });
+});
+
+/** Desconecta el WhatsApp del tenant (borra la instancia en Evolution). */
+router.post('/whatsapp/disconnect', requireAuth, async (req, res) => {
+  if (req.tenant.evolution_instance) {
+    await deleteInstance(instanceNameFor(req.tenant));
   }
-  await q.run('UPDATE tenants SET wa_connected = 1, wa_display_phone = ? WHERE id = ?', [result.displayPhone || '', tenant.id]);
-  res.json({ ok: true, displayPhone: result.displayPhone, verifiedName: result.verifiedName });
+  await q.run("UPDATE tenants SET wa_connected = 0, wa_display_phone = '', evolution_instance = '' WHERE id = ?", [
+    req.tenant.id,
+  ]);
+  res.json({ ok: true });
 });
 
 // ---------- Servicios ----------

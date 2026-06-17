@@ -244,4 +244,5 @@ CREATE INDEX IF NOT EXISTS idx_messages_tenant_customer ON messages(tenant_id, c
   await addColumn('tenants', 'digest_hour INTEGER NOT NULL DEFAULT 8');
   await addColumn('tenants', "last_digest_date TEXT NOT NULL DEFAULT ''");
   await addColumn('customers', 'bot_paused INTEGER NOT NULL DEFAULT 0');
+  await addColumn('tenants', "evolution_instance TEXT NOT NULL DEFAULT ''");
 }

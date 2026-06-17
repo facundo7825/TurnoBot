@@ -1,91 +1,89 @@
-# Configuración de plataforma — Conexión WhatsApp con 1 click
+# Configuración de plataforma — Conexión WhatsApp por QR (Evolution API)
 
-Esta guía es para **el dueño de la plataforma** (vos), una sola vez. Cuando la completes,
-cada usuario conecta su WhatsApp apretando un botón y siguiendo un popup de Facebook —
-sin tokens, sin webhooks, sin tocar Meta for Developers.
+Esta guía es para **el dueño de la plataforma** (vos), una sola vez. Cuando la
+completes, cada negocio conecta su WhatsApp **escaneando un QR** (como WhatsApp
+Web), sin trámites de Meta, sin verificación, sin tokens.
 
-Así funcionan las plataformas grandes (Wati, 360dialog, etc.): usan el
-**Embedded Signup** oficial de Meta. El usuario final solo necesita una cuenta de
-Facebook y un número de teléfono.
+Usamos **Evolution API**, una API no oficial de WhatsApp (open source, gratuita)
+que se conecta vía Baileys. Vos la hospedás una vez y todos tus clientes la
+usan: cada negocio = una "instancia" con su propio QR.
 
-## Requisitos previos
+> ⚠️ **Importante:** Evolution API es **no oficial** y va contra los términos de
+> WhatsApp. Meta puede banear el número de un cliente en cualquier momento. El
+> riesgo es bajo para un bot que responde (no hace spam), pero no es cero. Es
+> ideal para validar y arrancar; para algo a prueba de todo, la API oficial de
+> Meta es más sólida (ver historial del proyecto).
 
-- Una cuenta en [Meta for Developers](https://developers.facebook.com) (gratis).
-- Un **Meta Business Portfolio** verificado a tu nombre (Business Manager → Configuración → Información del negocio → Verificación). La verificación puede tardar unos días.
-- Tu servidor accesible por **HTTPS público** (en producción un dominio; para pruebas `ngrok http 4000`).
+## Requisitos
 
-## Paso 1 — Crear la app
+- Una cuenta en Railway (o un VPS) para hospedar Evolution API.
+- Tu app de TurnoBot ya desplegada (ver `DEPLOY.md`).
 
-1. [developers.facebook.com/apps](https://developers.facebook.com/apps) → **Crear app** → tipo **Business**.
-2. Agregá los productos **WhatsApp** y **Facebook Login for Business**.
+## Paso 1 — Desplegar Evolution API en Railway
 
-## Paso 2 — Configurar el webhook (una sola vez, para todos tus usuarios)
+Evolution necesita su propia base de datos PostgreSQL. La forma más simple:
 
-En **WhatsApp → Configuración → Webhook**:
+1. En tu proyecto de Railway → **New → Database → PostgreSQL** (una base aparte
+   para Evolution, distinta de la de TurnoBot). Copiá su `DATABASE_URL`.
+2. **New → Empty Service → Deploy from Docker Image**, imagen:
+   ```
+   atendai/evolution-api:v2.1.1
+   ```
+3. En ese servicio → **Variables**, cargá:
+   ```
+   AUTHENTICATION_API_KEY = <inventá-una-clave-larga-y-secreta>
+   DATABASE_PROVIDER = postgresql
+   DATABASE_CONNECTION_URI = <la DATABASE_URL del Postgres de Evolution>
+   DATABASE_SAVE_DATA_INSTANCE = true
+   CACHE_LOCAL_ENABLED = true
+   CACHE_REDIS_ENABLED = false
+   ```
+4. En ese servicio → **Settings → Networking → Generate Domain**. Te da la URL de
+   Evolution, p.ej. `https://evolution-production-xxxx.up.railway.app`.
 
-- **Callback URL:** `https://TU-DOMINIO/api/webhook`
-- **Verify token:** el valor que pongas en `WEBHOOK_VERIFY_TOKEN` del `.env`
-- Suscribite al campo **messages**
+## Paso 2 — Conectar TurnoBot con Evolution
 
-Como cada cuenta de WhatsApp de tus usuarios se suscribe a TU app automáticamente
-durante el signup, todos sus mensajes llegan a este único webhook y TurnoBot los
-enruta al negocio correcto.
-
-## Paso 3 — Crear la configuración de Embedded Signup
-
-En **Facebook Login for Business → Configuraciones** → **Crear configuración**:
-
-- Tipo: **WhatsApp Embedded Signup**
-- Activos: WhatsApp Business Account + número de teléfono
-- Guardá y copiá el **ID de configuración** (`config_id`)
-
-## Paso 4 — Variables de entorno
-
-Creá `server/.env` (hay un ejemplo en `server/.env.example`):
+En el servicio **de TurnoBot** (no el de Evolution) → **Variables**, agregá:
 
 ```
-META_APP_ID=tu_app_id
-META_APP_SECRET=tu_app_secret        # App → Configuración → Básica
-META_CONFIG_ID=tu_config_id          # el del paso 3
-WEBHOOK_VERIFY_TOKEN=un_token_secreto_que_elijas
-JWT_SECRET=otro_secreto_largo
+EVOLUTION_API_URL = https://evolution-production-xxxx.up.railway.app
+EVOLUTION_API_KEY = <la misma AUTHENTICATION_API_KEY del paso 1>
+APP_URL = https://turnobot-production.up.railway.app   (tu dominio de TurnoBot)
 ```
 
-Reiniciá el server. La página "Conexión WhatsApp" detecta sola que el modo
-1-click está habilitado y muestra el botón **Conectar mi WhatsApp con Facebook**.
+`APP_URL` es importante: es la URL a la que Evolution le manda los mensajes
+entrantes (el webhook). TurnoBot la usa para configurar cada instancia.
 
-## Paso 5 — Revisión de Meta (para salir a producción)
+Railway redeploya TurnoBot solo. Listo: la página "Conexión WhatsApp" detecta que
+Evolution está disponible y muestra el botón **Generar código QR**.
 
-Mientras la app está en **modo desarrollo**, el signup solo funciona con cuentas
-que agregues como testers/administradores de la app. Para abrirlo a cualquier
-usuario:
+## Cómo lo vive tu cliente (negocio)
 
-1. En **Revisión de la app**, pedí los permisos `whatsapp_business_management` y
-   `whatsapp_business_messaging` (acceso avanzado).
-2. Completá la verificación del negocio si no la hiciste.
-3. Pasá la app a **modo Live**.
+1. Entra a su panel → **Conexión WhatsApp** → **Generar código QR**.
+2. En su celular: WhatsApp → **Dispositivos vinculados → Vincular un dispositivo**.
+3. Escanea el QR. En unos segundos queda conectado y el bot responde solo.
 
-## Qué hace TurnoBot automáticamente en cada conexión
+No pierde su WhatsApp: lo sigue usando normal en el teléfono (es como WhatsApp Web).
 
-Cuando un usuario termina el popup de Facebook, el servidor:
+## Qué hace TurnoBot automáticamente
 
-1. Cambia el código OAuth por un **token de larga duración** del usuario.
-2. **Suscribe** su cuenta de WhatsApp (WABA) a tu app → sus mensajes llegan a tu webhook.
-3. **Registra** su número en la Cloud API (con un PIN autogenerado).
-4. Verifica el número y guarda todo en su cuenta. Listo: el bot responde.
+Cuando el cliente toca "Generar código QR", el servidor:
 
-## Costos de Meta — ¿a quién le cobran?
+1. Crea una **instancia** en Evolution para ese negocio.
+2. Le configura el **webhook** apuntando a `APP_URL/api/webhook`.
+3. Muestra el **QR** y consulta el estado hasta que conecta.
+4. Al conectar, guarda el número y marca el WhatsApp como activo.
 
-**A cada usuario (negocio), nunca a la plataforma.** Durante el Embedded Signup cada
-usuario crea su propia cuenta de WhatsApp Business (WABA) a su nombre; Meta factura
-contra la tarjeta que ese negocio cargue en su WhatsApp Manager. Tu app de Meta no
-tiene costo.
+Desde ahí, cada mensaje que reciba ese WhatsApp llega al webhook, TurnoBot lo
+rutea al negocio correcto (por el nombre de instancia) y el bot responde.
 
-- Las **conversaciones de servicio** (el cliente escribe y el bot responde dentro de
-  las 24 hs — todo el uso normal de TurnoBot) son **gratis**.
-- Solo se pagan las **plantillas** (mensajes que el negocio inicia fuera de la ventana
-  de 24 hs): en nuestro caso, los **recordatorios de turno** del día anterior. Son
-  centavos por mensaje (tarifa "utility") y requieren plantillas aprobadas por Meta
-  para entrega confiable. Si el usuario no carga tarjeta, lo gratuito sigue andando.
-- Esquema avanzado (opcional, a futuro): los Solution Partners oficiales pueden poner
-  su línea de crédito y recobrarle a sus usuarios. No es necesario para operar.
+## Notas de producción
+
+- **Recursos:** cada instancia mantiene una conexión viva. Con muchos clientes,
+  Evolution necesita bastante RAM. Monitoreá el servicio de Evolution.
+- **Reconexión:** si una sesión se cae (WhatsApp lo permite por inactividad o
+  cambios de Meta), el cliente vuelve a escanear el QR desde su panel.
+- **Botones:** los botones nativos de WhatsApp son inestables vía Baileys, así que
+  el bot usa el menú de texto numerado (funciona siempre).
+- **Backups:** la base de Evolution guarda las sesiones; si la perdés, los clientes
+  tienen que reconectar. Railway hace backups del Postgres.
